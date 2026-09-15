@@ -417,7 +417,8 @@ sequenceDiagram
     CLOUD->>DEV: Endpoint restored
     DEV->>CLOUD: Drain queue (rate-limited, no CPU/network storm)
     CLOUD-->>DEV: Ack
-    Note over DEV,Q: Queue never exceeds configured cap (FR-DEV-008);<br/>oldest-record expiry applies if still full
+    Note over DEV,Q: Queue never exceeds configured cap per FR-DEV-008
+    Note over DEV,Q: Oldest-record expiry applies if still full
 ```
 
 ---

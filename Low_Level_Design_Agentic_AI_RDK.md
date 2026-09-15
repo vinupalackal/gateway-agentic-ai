@@ -231,7 +231,7 @@ stateDiagram-v2
     Enabling --> Enabled: config validated, components started
     Enabling --> Disabled: config validation failed (safe fallback)
     Enabled --> Disabling: RFC disable command / kill switch
-    Disabling --> Disabled: receiver stopped, exporter stopped,<br/>queue writes stopped, memory released
+    Disabling --> Disabled: receiver exporter and queue writes stopped, memory released
 ```
 
 **Configuration schema (full RFC parameter reference):**
@@ -407,11 +407,13 @@ sequenceDiagram
     participant M3 as Edge Collector Queue
     participant CLOUD as Cloud OTLP Gateway
 
-    M2->>M3: health_event (severity=high)
-    M3->>M3: Queue at cap (24 MiB)
-    M3->>M3: Apply class-priority drop:<br/>drop oldest span before dropping any health_event
-    M3->>CLOUD: Attempt export (still failing)
-    Note over M3: No OOM, no crash — bounded drop only (FR-SAFE / NFR-REL-003)
+    M2->>M3: health_event severity=high
+    M3->>M3: Queue at cap, 24 MiB
+    M3->>M3: Apply class-priority drop policy
+    M3->>M3: Drop oldest span before dropping any health_event
+    M3->>CLOUD: Attempt export, still failing
+    Note over M3: No OOM, no crash - bounded drop only
+    Note over M3: Enforced by FR-SAFE and NFR-REL-003
 ```
 
 ---
