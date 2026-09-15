@@ -152,6 +152,49 @@ Because the reference device already consumes ~63 MiB of swap, the deployment en
 **Device responsibilities:** Observe, Collect, Correlate (locally, shallow), Export, Execute (allowlisted), Verify (post-action telemetry only).
 **Cloud responsibilities:** Analyze, Reason, Predict, Recommend, Learn, Govern.
 
+### 3.1 Architecture Diagram
+
+```mermaid
+flowchart TB
+    subgraph CLOUD["☁️ CLOUD PLATFORM"]
+        direction TB
+        ORCH["Agentic AI Orchestrator"]
+        REASON["Reasoning Engine<br/>Root Cause Analysis · Recommendations"]
+        KG["Knowledge Graph<br/>Fleet Correlation · Device/Subscriber Topology"]
+        POLICY["Policy Engine /<br/>Action Approval Service"]
+        LLM["LLM + Multi-Agent Framework<br/>Network · Device · Care · Marketing · Security · Ops"]
+        OTELB["OTEL Backend<br/>Tempo/Jaeger · Metrics Store · Log Store"]
+
+        OTELB --> REASON
+        REASON --> KG
+        REASON --> ORCH
+        ORCH --> LLM
+        ORCH --> POLICY
+    end
+
+    subgraph DEVICE["📡 RDK DOCSIS GATEWAY (ARMv7, ~750MB RAM)"]
+        direction TB
+        SVC["Existing RDK Services<br/>WAN Manager · OneWiFi · WebPA · RFC<br/>RBUS · Telemetry 2.0 · PAM · SelfHeal · CCSP"]
+        INSTR["OTEL Instrumentation<br/>(trace/span creation only)"]
+        RULES["Local Health / Rule Evaluator<br/>(deterministic thresholds)"]
+        FWD["Lightweight OTLP Forwarder<br/>(batch · compress · retry)"]
+        QUEUE["Bounded Persistent Queue<br/>(outage buffering)"]
+        AG["Action Gateway<br/>(allowlisted remediation executor)"]
+
+        SVC --> INSTR --> RULES --> FWD --> QUEUE
+        AG --> SVC
+    end
+
+    QUEUE -- "OTLP / HTTPS (TLS 1.2+)" --> OTELB
+    POLICY -- "Approved Action<br/>(action_id, action_type, confidence)" --> AG
+    AG -- "Post-Action Verification Telemetry" --> REASON
+
+    classDef cloud fill:#eef2ff,stroke:#4f46e5,color:#1e1b4b;
+    classDef device fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    class ORCH,REASON,KG,POLICY,LLM,OTELB cloud;
+    class SVC,INSTR,RULES,FWD,QUEUE,AG device;
+```
+
 ---
 
 ## 4. RDK Component Mapping
@@ -209,6 +252,128 @@ This hardware realistically supports **70–80% of an Aura-style edge architectu
 ---
 
 ## 6. Functional Requirements — Device Side (Edge)
+
+### 6.0 Device-Side Component Workflow
+
+```mermaid
+flowchart TD
+    subgraph RDKSVC["Existing RDK Services"]
+        WAN["WAN Manager"]
+        WIFI["OneWiFi"]
+        WEBPA["WebPA"]
+        RBUS["RBUS"]
+        PAM["PAM"]
+        SH["SelfHeal"]
+        T2["Telemetry 2.0"]
+    end
+
+    RFC["RFC Lifecycle Control<br/>enable/disable · sampling rate ·<br/>endpoint · kill switch"]
+
+    INSTR["OTEL Instrumentation Layer<br/>span / metric / event creation<br/>+ trace context propagation"]
+
+    RULES["Local Health / Rule Evaluator<br/>deterministic thresholds<br/>+ small-model anomaly detection"]
+
+    subgraph COLLECTOR["Lightweight Edge Collector"]
+        FILTER["Filter /<br/>Adaptive Sampler"]
+        BATCH["Batcher"]
+        QUEUE["Bounded Persistent<br/>Queue"]
+        EXPORT["OTLP Exporter<br/>retry + backoff"]
+        FILTER --> BATCH --> QUEUE --> EXPORT
+    end
+
+    subgraph ACTIONGW["Action Gateway"]
+        VALIDATE["Validate:<br/>allowlist · idempotency ·<br/>rate limit · preconditions"]
+        EXEC["Execute Action"]
+        VERIFY["Capture Post-Action<br/>Telemetry"]
+        VALIDATE --> EXEC --> VERIFY
+    end
+
+    CLOUDIN(["☁️ Cloud OTEL Backend"])
+    CLOUDACT(["☁️ Cloud Policy Engine<br/>approved action"])
+
+    RDKSVC -- "raw events / KPIs" --> INSTR
+    INSTR --> RULES
+    RULES -- "interesting events only" --> FILTER
+    RULES -- "low-risk allowlisted<br/>local trigger" --> VALIDATE
+    EXPORT -- "OTLP / HTTPS" --> CLOUDIN
+    CLOUDACT --> VALIDATE
+    EXEC --> RDKSVC
+    VERIFY -- "outcome telemetry" --> EXPORT
+
+    RFC -.governs.-> INSTR
+    RFC -.governs.-> RULES
+    RFC -.governs.-> COLLECTOR
+    RFC -.governs.-> ACTIONGW
+
+    classDef svc fill:#f8fafc,stroke:#64748b,color:#1e293b;
+    classDef ctrl fill:#fef3c7,stroke:#d97706,color:#78350f;
+    classDef proc fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef cloud fill:#eef2ff,stroke:#4f46e5,color:#1e1b4b;
+    class WAN,WIFI,WEBPA,RBUS,PAM,SH,T2 svc;
+    class RFC ctrl;
+    class INSTR,RULES,FILTER,BATCH,QUEUE,EXPORT,VALIDATE,EXEC,VERIFY proc;
+    class CLOUDIN,CLOUDACT cloud;
+```
+
+### 6.0.1 Device-Side Use Case Diagram
+
+```mermaid
+flowchart LR
+    OPER(["🔧 RDK Operator / Admin"])
+    CLOUDPE(["☁️ Cloud Policy Engine"])
+    RULEEVAL(["🤖 Local Rule Evaluator<br/>(autonomous)"])
+    SUBAPP(["🧑 Subscriber<br/>(via mobile app, indirectly)"])
+
+    subgraph DUC["Device-Side Use Cases"]
+        DUC1(("Enable / Disable<br/>Telemetry & Actions"))
+        DUC2(("Configure Sampling<br/>& Thresholds"))
+        DUC3(("Execute Allowlisted<br/>Action"))
+        DUC4(("Buffer Telemetry<br/>During Outage"))
+        DUC5(("Report Execution<br/>Outcome"))
+        DUC6(("Detect Local<br/>Anomaly"))
+    end
+
+    OPER --> DUC1
+    OPER --> DUC2
+    CLOUDPE --> DUC3
+    RULEEVAL --> DUC3
+    RULEEVAL --> DUC6
+    SUBAPP -. "triggers via cloud" .-> DUC3
+    DUC3 --> DUC5
+    DUC4 --> DUC5
+
+    classDef actor fill:#fff7ed,stroke:#c2410c,color:#7c2d12;
+    classDef usecase fill:#f0f9ff,stroke:#0284c7,color:#0c4a6e;
+    class OPER,CLOUDPE,RULEEVAL,SUBAPP actor;
+    class DUC1,DUC2,DUC3,DUC4,DUC5,DUC6 usecase;
+```
+
+### 6.0.2 Device Data Flow
+
+Two independent data paths run through the device: a **telemetry path** (device → cloud, always-on but sampled) and an **action path** (cloud → device → cloud, triggered only on approved remediation).
+
+```mermaid
+flowchart LR
+    subgraph TELFLOW["Telemetry Data Flow — Device → Cloud"]
+        direction LR
+        T1["RDK Service<br/>Event"] --> T2["OTEL Span/Metric<br/>Creation"] --> T3["Local Rule Filter<br/>noise vs. interesting"] --> T4["Batch +<br/>Sample"] --> T5["Persistent Queue<br/>if offline"] --> T6["OTLP<br/>Export"] --> T7["Cloud OTEL<br/>Backend"]
+    end
+
+    subgraph ACTFLOW["Action Data Flow — Cloud → Device → Cloud"]
+        direction LR
+        A1["Cloud Recommendation<br/>+ Confidence Score"] --> A2["Policy Engine<br/>Approval"] --> A3["Action Gateway<br/>Validation"] --> A4["RDK Service<br/>Execution"] --> A5["Post-Action<br/>Telemetry Capture"] --> A6["Outcome<br/>Verification (Cloud)"]
+    end
+
+    classDef tel fill:#f0f9ff,stroke:#0284c7,color:#0c4a6e;
+    classDef act fill:#fff7ed,stroke:#c2410c,color:#7c2d12;
+    class T1,T2,T3,T4,T5,T6,T7 tel;
+    class A1,A2,A3,A4,A5,A6 act;
+```
+
+**Key data-flow rules (traceable to requirements below):**
+- The telemetry path discards noise before batching (FR-DEV-010) and never blocks on cloud availability — it queues instead (FR-DEV-008).
+- The action path never skips validation, even for cloud-approved actions (FR-DEV-015/FR-SAFE-001) — the Action Gateway is the single choke point for every RDK service mutation.
+- Both paths are independently governed by the RFC lifecycle switch (FR-DEV-023) and collapse to a true no-op when disabled (NFR-HW-003).
 
 ### 6.1 Telemetry Instrumentation
 - **FR-DEV-001:** The device shall instrument approved RDK components only (WAN Manager, OneWiFi, WebPA, RFC, RBUS, PAM, SelfHeal, Telemetry 2.0) via a common RDK OTEL wrapper layer — not all services/HALs/processes.
@@ -424,6 +589,49 @@ To avoid treating OTEL as a full observability platform on-device, the payload c
 | UC-006 | Threat Detection and Isolation | Security Analyst | Reduced security incidents |
 | UC-007 | OTEL-Based Root Cause Analysis | Engineering Team | Faster incident resolution |
 
+### 11.1 Use Case Diagram
+
+```mermaid
+flowchart LR
+    SUB(["🧑 Subscriber"])
+    CARE(["🎧 Customer Care Agent"])
+    NOC(["🛠️ NOC Engineer"])
+    ENG(["⚙️ Device Engineer"])
+    MKT(["📈 Marketing Analyst"])
+    SEC(["🛡️ Security Analyst"])
+    ENGTEAM(["👩‍💻 Engineering Team"])
+    AI(["🤖 AI Agent<br/>(cloud-resident)"])
+
+    subgraph UC["Agentic AI Platform — Use Cases"]
+        UC1(("UC-001<br/>Self-Healing<br/>Assistance"))
+        UC2(("UC-002<br/>AI-Assisted<br/>Customer Support"))
+        UC3(("UC-003<br/>Fleet-Wide<br/>Outage Detection"))
+        UC4(("UC-004<br/>Automated<br/>Firmware Rollout"))
+        UC5(("UC-005<br/>Churn Prediction<br/>& Prevention"))
+        UC6(("UC-006<br/>Threat Detection<br/>& Isolation"))
+        UC7(("UC-007<br/>OTEL Root<br/>Cause Analysis"))
+    end
+
+    SUB --> UC1
+    CARE --> UC2
+    NOC --> UC3
+    ENG --> UC4
+    MKT --> UC5
+    SEC --> UC6
+    ENGTEAM --> UC7
+
+    AI -.assists.-> UC1
+    AI -.assists.-> UC2
+    AI -.assists.-> UC3
+    AI -.assists.-> UC6
+    AI -.assists.-> UC7
+
+    classDef actor fill:#fff7ed,stroke:#c2410c,color:#7c2d12;
+    classDef usecase fill:#f0f9ff,stroke:#0284c7,color:#0c4a6e;
+    class SUB,CARE,NOC,ENG,MKT,SEC,ENGTEAM,AI actor;
+    class UC1,UC2,UC3,UC4,UC5,UC6,UC7 usecase;
+```
+
 **Representative end-to-end flow (Wi-Fi performance issue):**
 1. OneWiFi detects RSSI = −82, high retries → device emits a `wifi_health` event (not a full trace).
 2. Cloud correlation engine finds 1,500 similar homes on the same firmware/chipset.
@@ -431,6 +639,32 @@ To avoid treating OTEL as a full observability platform on-device, the payload c
 4. Policy engine auto-approves (low-risk action) → sends `{"action":"change_channel","channel":149}`.
 5. Device Action Gateway validates and executes via OneWiFi → HAL.
 6. Device re-measures RSSI/retries and reports outcome; cloud stores the case for future learning.
+
+### 11.2 Sequence Diagram — Wi-Fi Performance Issue (End-to-End)
+
+```mermaid
+sequenceDiagram
+    participant D as Device (OneWiFi)
+    participant Q as Edge Collector / Queue
+    participant R as Cloud Reasoning Engine
+    participant KG as Knowledge Graph
+    participant P as Policy Engine
+    participant AG as Action Gateway (Device)
+
+    D->>D: Detect RSSI = -82, retries = high
+    D->>Q: Emit wifi_health event
+    Q->>R: Export via OTLP/HTTPS
+    R->>KG: Correlate against fleet (same firmware/chipset)
+    KG-->>R: 1,500 similar homes affected
+    R->>R: Root cause = channel congestion (confidence 94%)
+    R->>P: Recommend action (change_channel, ch=149)
+    P->>P: Evaluate risk — low risk, allowlisted → auto-approve
+    P->>AG: Approved action {action_id, change_channel, ch=149}
+    AG->>D: Validate preconditions, execute via OneWiFi → HAL
+    D-->>AG: Execution status: success
+    AG-->>R: Post-action telemetry (RSSI=-65, retries=2)
+    R->>R: Verify outcome, store case in Knowledge Graph
+```
 
 ---
 
@@ -448,6 +682,23 @@ To avoid treating OTEL as a full observability platform on-device, the payload c
 **Final target device footprint:** ~20 MB total (SDK 4 MB + context propagation 2 MB + forwarder 8 MB + health evaluator 2 MB + action gateway 2 MB + buffer/queue 2 MB), 1–3% average CPU — consistent with, and bounded by, the hard limits in Section 2.3.
 
 **Traffic reduction principle:** Event-driven tracing (trigger only on WAN failure, high latency, WiFi join failure, channel change, speed-test failure, crash, reboot) typically reduces telemetry volume by 80–95% versus always-on tracing while preserving root-cause signal.
+
+### 12.1 Rollout Phase Diagram
+
+```mermaid
+flowchart LR
+    P0["Phase 0<br/>Packaging Only<br/>RAM < 5MB · CPU < 0.5%<br/>(Internal)"]
+    P1["Phase 1<br/>Trace Collection MVP<br/>WAN Mgr · OneWiFi · WebPA · RBUS<br/>(1% of devices)"]
+    P2["Phase 2<br/>Embedded Forwarder<br/>batch/retry/queue only<br/>(Expanding cohort)"]
+    P3["Phase 3<br/>Fleet Correlation<br/>Cloud-only: KG + RCA engine<br/>(5% → 10% → 25%)"]
+    P4["Phase 4<br/>Agentic Recommendations<br/>Human approval required<br/>(Staged)"]
+    P5["Phase 5<br/>Autonomous Safe Actions<br/>Low-risk actions auto-approved<br/>(GA)"]
+
+    P0 --> P1 --> P2 --> P3 --> P4 --> P5
+
+    classDef phase fill:#f5f3ff,stroke:#7c3aed,color:#3730a3;
+    class P0,P1,P2,P3,P4,P5 phase;
+```
 
 ---
 
